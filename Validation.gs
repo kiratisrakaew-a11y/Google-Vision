@@ -33,7 +33,7 @@ function normalizeDate_(value) {
 
   var slashMatch = text.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);
   if (slashMatch) {
-    return formatDateParts_(normalizeYear_(Number(slashMatch[3])), Number(slashMatch[2]), Number(slashMatch[1]));
+    return formatDateParts_(Number(slashMatch[3]), Number(slashMatch[2]), Number(slashMatch[1]));
   }
 
   var thaiMonths = {
@@ -53,7 +53,7 @@ function normalizeDate_(value) {
 
   var thaiMatch = text.match(/(\d{1,2})\s*([ก-๙]+)\s*(\d{4})/);
   if (thaiMatch && thaiMonths[thaiMatch[2]]) {
-    return formatDateParts_(normalizeYear_(Number(thaiMatch[3])), thaiMonths[thaiMatch[2]], Number(thaiMatch[1]));
+    return formatDateParts_(Number(thaiMatch[3]), thaiMonths[thaiMatch[2]], Number(thaiMatch[1]));
   }
 
   return text;
@@ -83,13 +83,15 @@ function formatDateParts_(year, month, day) {
 function validateInvoice_(invoice) {
   var missingFields = getMissingFields_(invoice);
   var lowConfidenceFields = getLowConfidenceFields_(invoice);
+  var blockingLowConfidenceFields = getBlockingLowConfidenceFields_(invoice);
   var overallConfidence = calculateOverallConfidence_(invoice);
   var lowestRequiredConfidence = calculateLowestRequiredConfidence_(invoice);
   var amountCheck = validateAmountConsistency_(invoice);
+  var vatRateCheck = validateVatRate_(invoice);
   var taxIdValid = validateTaxId_(invoice.supplier_tax_id.value);
   var reviewStatus = 'OK';
 
-  if (missingFields.length || lowConfidenceFields.length || overallConfidence < CONFIG.OVERALL_CONFIDENCE_THRESHOLD || !amountCheck.valid || !taxIdValid) {
+  if (missingFields.length || blockingLowConfidenceFields.length || overallConfidence < CONFIG.OVERALL_CONFIDENCE_THRESHOLD || !amountCheck.valid || !taxIdValid) {
     reviewStatus = 'NEEDS_REVIEW';
   }
 
@@ -99,7 +101,9 @@ function validateInvoice_(invoice) {
     reviewStatus: reviewStatus,
     missingFields: missingFields,
     lowConfidenceFields: lowConfidenceFields,
+    blockingLowConfidenceFields: blockingLowConfidenceFields,
     amountCheck: amountCheck,
+    vatRateCheck: vatRateCheck,
     taxIdValid: taxIdValid
   };
 }
@@ -134,8 +138,16 @@ function getMissingFields_(invoice) {
 }
 
 function getLowConfidenceFields_(invoice) {
-  return Object.keys(FIELD_THRESHOLDS).filter(function (field) {
-    if (!invoice[field] || !invoice[field].value) {
+  return getLowConfidenceFieldsByFieldNames_(invoice, Object.keys(FIELD_THRESHOLDS));
+}
+
+function getBlockingLowConfidenceFields_(invoice) {
+  return getLowConfidenceFieldsByFieldNames_(invoice, REQUIRED_FIELDS);
+}
+
+function getLowConfidenceFieldsByFieldNames_(invoice, fieldNames) {
+  return fieldNames.filter(function (field) {
+    if (!invoice[field] || !invoice[field].value || typeof FIELD_THRESHOLDS[field] !== 'number') {
       return false;
     }
 
@@ -157,6 +169,7 @@ function validateAmountConsistency_(invoice) {
   if (subtotal === null || vat === null || total === null) {
     return {
       valid: true,
+      skipped: true,
       message: 'Skipped because subtotal, VAT, or total is missing.'
     };
   }
@@ -164,7 +177,30 @@ function validateAmountConsistency_(invoice) {
   var difference = Math.abs((subtotal + vat) - total);
   return {
     valid: difference <= CONFIG.AMOUNT_TOLERANCE,
+    skipped: false,
     message: 'subtotal + vat vs total difference = ' + difference.toFixed(2)
+  };
+}
+
+function validateVatRate_(invoice) {
+  var subtotal = parseAmount_(invoice.subtotal.value);
+  var vat = parseAmount_(invoice.vat.value);
+
+  if (subtotal === null || vat === null) {
+    return {
+      valid: true,
+      skipped: true,
+      message: 'Skipped because subtotal or VAT is missing.'
+    };
+  }
+
+  var expectedVat = subtotal * CONFIG.VAT_RATE;
+  var difference = Math.abs(expectedVat - vat);
+
+  return {
+    valid: difference <= CONFIG.AMOUNT_TOLERANCE,
+    skipped: false,
+    message: 'VAT vs configured rate difference = ' + difference.toFixed(2)
   };
 }
 

@@ -1,8 +1,7 @@
 function doGet() {
   return HtmlService
     .createHtmlOutputFromFile('Index')
-    .setTitle('Invoice Document AI Upload')
-    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+    .setTitle('Invoice Document AI Upload');
 }
 
 function uploadInvoice(payload) {
@@ -27,21 +26,28 @@ function uploadInvoice(payload) {
     var document = documentAiResponse.document || {};
     var invoice = mapInvoiceFields_(document);
     var validation = validateInvoice_(invoice);
-    var duplicate = findDuplicateInvoice_(invoice.supplier_tax_id.value, invoice.invoice_no.value);
 
-    if (duplicate.isDuplicate && validation.reviewStatus === 'OK') {
-      validation.reviewStatus = 'DUPLICATE';
+    var lock = LockService.getScriptLock();
+    lock.waitLock(30000);
+    try {
+      var duplicate = findDuplicateInvoice_(invoice.supplier_tax_id.value, invoice.invoice_no.value);
+
+      if (duplicate.isDuplicate && validation.reviewStatus === 'OK') {
+        validation.reviewStatus = 'DUPLICATE';
+      }
+
+      appendInvoiceToSheet_({
+        fileName: payload.fileName,
+        fileUrl: uploadedFile.getUrl(),
+        invoice: invoice,
+        rawText: document.text || '',
+        documentJson: documentAiResponse,
+        validation: validation,
+        errorMessage: ''
+      });
+    } finally {
+      lock.releaseLock();
     }
-
-    appendInvoiceToSheet_({
-      fileName: payload.fileName,
-      fileUrl: uploadedFile.getUrl(),
-      invoice: invoice,
-      rawText: document.text || '',
-      documentJson: documentAiResponse,
-      validation: validation,
-      errorMessage: ''
-    });
 
     writeLog_('INFO', fileName, 'SHEET', 'Invoice row appended', validation.reviewStatus);
 
