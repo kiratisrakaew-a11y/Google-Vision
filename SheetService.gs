@@ -8,10 +8,10 @@ function appendInvoiceToSheet_(record) {
     record.fileName || '',
     record.fileUrl || '',
     getFieldValue_(invoice, 'supplier_name'),
-    getFieldValue_(invoice, 'supplier_tax_id'),
-    getFieldValue_(invoice, 'invoice_no'),
-    getFieldValue_(invoice, 'invoice_date'),
-    getFieldValue_(invoice, 'due_date'),
+    asSheetText_(getFieldValue_(invoice, 'supplier_tax_id')),
+    asSheetText_(getFieldValue_(invoice, 'invoice_no')),
+    asSheetText_(getFieldValue_(invoice, 'invoice_date')),
+    asSheetText_(getFieldValue_(invoice, 'due_date')),
     getFieldValue_(invoice, 'subtotal'),
     getFieldValue_(invoice, 'vat'),
     getFieldValue_(invoice, 'total'),
@@ -22,11 +22,11 @@ function appendInvoiceToSheet_(record) {
     (validation.missingFields || []).join(', '),
     (validation.lowConfidenceFields || []).join(', '),
     record.rawText || '',
-    truncateForCell_(JSON.stringify(record.documentJson || {})),
+    prepareDocumentJsonCell_(record.fileName, record.documentJson || {}),
     record.errorMessage || '',
     '',
     '',
-    validation.reviewStatus === 'OK' ? 'APPROVED' : 'PENDING',
+    'PENDING',
     ''
   ]);
 }
@@ -36,7 +36,13 @@ function safeAppendErrorInvoiceRow_(fileName, errorMessage) {
     return;
   }
 
-  appendErrorInvoiceRow_(fileName, errorMessage);
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    appendErrorInvoiceRow_(fileName, errorMessage);
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function appendErrorInvoiceRow_(fileName, errorMessage) {
@@ -82,9 +88,12 @@ function findDuplicateInvoice_(supplierTaxId, invoiceNo) {
     return { isDuplicate: false, rowNumber: null };
   }
 
-  var values = sheet.getRange(2, 5, lastRow - 1, 2).getValues();
+  var values = sheet.getRange(2, 5, lastRow - 1, 2).getDisplayValues();
+  var expectedSupplierTaxId = stripSheetTextPrefix_(supplierTaxId);
+  var expectedInvoiceNo = stripSheetTextPrefix_(invoiceNo);
+
   for (var index = 0; index < values.length; index += 1) {
-    if (String(values[index][0]) === String(supplierTaxId) && String(values[index][1]) === String(invoiceNo)) {
+    if (stripSheetTextPrefix_(values[index][0]) === expectedSupplierTaxId && stripSheetTextPrefix_(values[index][1]) === expectedInvoiceNo) {
       return { isDuplicate: true, rowNumber: index + 2 };
     }
   }
@@ -140,6 +149,57 @@ function ensureHeaders_(sheet, headers) {
 
 function getFieldValue_(invoice, field) {
   return invoice[field] ? invoice[field].value : '';
+}
+
+function asSheetText_(value) {
+  if (value === '' || value === null || typeof value === 'undefined') {
+    return '';
+  }
+
+  return "'" + String(value);
+}
+
+function stripSheetTextPrefix_(value) {
+  return String(value || '').replace(/^'/, '');
+}
+
+function prepareDocumentJsonCell_(fileName, documentJson) {
+  var jsonText = JSON.stringify(documentJson || {});
+
+  if (jsonText.length <= CONFIG.MAX_DOCUMENT_JSON_CHARS) {
+    return jsonText;
+  }
+
+  return storeDocumentJsonForAudit_(fileName, jsonText);
+}
+
+function storeDocumentJsonForAudit_(fileName, jsonText) {
+  try {
+    var folderId = getDocumentJsonFolderId_();
+    var folder = DriveApp.getFolderById(folderId);
+    var safeName = String(fileName || 'invoice')
+      .replace(/[^\w.\-ก-๙]+/g, '_')
+      .slice(0, 120);
+    var blob = Utilities.newBlob(
+      jsonText,
+      'application/json',
+      'document-ai-' + safeName + '-' + Utilities.getUuid() + '.json'
+    );
+    var file = folder.createFile(blob);
+
+    return 'Stored in Drive: ' + file.getUrl();
+  } catch (err) {
+    return truncateForCell_(jsonText);
+  }
+}
+
+function getDocumentJsonFolderId_() {
+  if (isConfigured_('DOCUMENT_JSON_FOLDER_ID')) {
+    return CONFIG.DOCUMENT_JSON_FOLDER_ID;
+  }
+
+  assertConfigured_('DRIVE_FOLDER_ID');
+  return CONFIG.DRIVE_FOLDER_ID;
 }
 
 function truncateForCell_(value) {
