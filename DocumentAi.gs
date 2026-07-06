@@ -15,6 +15,16 @@ function processInvoiceWithDocumentAi_(blob) {
     }
   };
 
+  if (CONFIG.OCR_LANGUAGE_HINTS && CONFIG.OCR_LANGUAGE_HINTS.length) {
+    payload.processOptions = {
+      ocrConfig: {
+        hints: {
+          languageHints: CONFIG.OCR_LANGUAGE_HINTS
+        }
+      }
+    };
+  }
+
   var response = UrlFetchApp.fetch(endpoint, {
     method: 'post',
     contentType: 'application/json',
