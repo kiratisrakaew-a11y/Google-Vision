@@ -2,7 +2,7 @@
 
 ## Project Mission
 
-This repository is for a Google Apps Script web application that lets users upload unstructured invoice documents, processes them with Google Document AI Invoice Parser, extracts Thai/English invoice fields, calculates confidence and review status, and appends the result to Google Sheets.
+This repository is for a Google Apps Script web application that lets users upload unstructured invoice documents, reads the text with Google Cloud Vision OCR, extracts Thai/English invoice fields with Gemini (Vertex AI), calculates confidence and review status, and appends the result to Google Sheets.
 
 Primary workflow:
 
@@ -10,8 +10,8 @@ Primary workflow:
 User uploads invoice
   -> Apps Script Web App receives file
   -> Save original file to Google Drive
-  -> Send file to Document AI Invoice Parser
-  -> Map Document AI entities to internal invoice fields
+  -> Send file to Cloud Vision OCR (DOCUMENT_TEXT_DETECTION, Thai/English)
+  -> Send the OCR text to Gemini (Vertex AI) to extract internal invoice fields
   -> Normalize and validate extracted values
   -> Calculate confidence metrics
   -> Decide OK / NEEDS_REVIEW / ERROR / DUPLICATE
@@ -24,15 +24,15 @@ User uploads invoice
 When implementing this project, prefer splitting Apps Script code into these files:
 
 - `Code.gs` - web app entry points, including `doGet()` and `uploadInvoice(payload)`.
-- `Config.gs` - project IDs, sheet/folder IDs, processor configuration, thresholds, and constants.
-- `DocumentAi.gs` - Document AI OCR processor calls and response handling (OCR only; does not do field extraction).
+- `Config.gs` - project IDs, sheet/folder IDs, Gemini/OCR configuration, thresholds, and constants.
+- `Vision.gs` - Google Cloud Vision OCR calls (`images:annotate` / `files:annotate`) and response handling (OCR only; returns raw text).
 - `Gemini.gs` - Gemini (Vertex AI) field extraction from the OCR raw text into the app's invoice data model.
 - `InvoiceMapper.gs` - shared field helpers (`createField_`) and normalization (`normalizeInvoiceFields_`) applied to the extracted invoice.
 - `Validation.gs` - normalization helpers, validation, confidence calculation, and review status logic.
 - `SheetService.gs` - Google Sheet append, duplicate detection, and audit log writes.
 - `Index.html` - upload UI and client-side JavaScript.
 
-Keep responsibilities separated. Do not put Document AI API logic, validation rules, and sheet-writing logic all in `Code.gs` unless this is only a very small prototype.
+Keep responsibilities separated. Do not put OCR API logic, validation rules, and sheet-writing logic all in `Code.gs` unless this is only a very small prototype.
 
 ## Google Sheet Schema
 
@@ -99,31 +99,33 @@ Use this internal field naming consistently:
 }
 ```
 
-## Field Extraction (Document OCR + Gemini)
+## Field Extraction (Cloud Vision OCR + Gemini)
 
-The pretrained Document AI Invoice Parser reliably extracts numbers and English text, but garbles
-Thai text and rejects OCR language-hint configuration (`ocrConfig` on the Invoice Parser returns
-`400 OCR_CONFIG_UNSUPPORTED`). Because invoices in this project are frequently Thai and vary widely
-in layout, field extraction uses OCR + an LLM instead of Invoice Parser entities:
+Google Document AI's invoice/OCR processors did not read Thai reliably in this project (garbled
+output even with language hints). Google Cloud Vision's `DOCUMENT_TEXT_DETECTION` is a separate OCR
+engine with strong Thai support, so the OCR layer uses Vision and an LLM (Gemini) does field
+extraction from the text:
 
-1. `DocumentAi.gs` calls a **Document OCR** processor (not Invoice Parser) with
-   `processOptions.ocrConfig.hints.languageHints` (`CONFIG.OCR_LANGUAGE_HINTS`, e.g. `['th', 'en']`)
-   so Thai text is read correctly. The response's `document.text` is the OCR raw text.
-2. `Gemini.gs` sends that raw text to Gemini on Vertex AI (`generateContent`, model
-   `CONFIG.GEMINI_MODEL` in `CONFIG.GEMINI_LOCATION`) using the deployer's OAuth token
-   (`ScriptApp.getOAuthToken()`, `cloud-platform` scope — no API key needed) and prompts it to
-   return strict JSON: one `{ value, confidence }` object per field in `CONFIG.INVOICE_FIELD_NAMES`
-   (the same 9 internal fields listed above).
-3. `InvoiceMapper.gs`'s `normalizeInvoiceFields_` then normalizes the extracted values the same way
-   regardless of source: tax ID digits, dates, amounts, currency default.
-4. Preserve the original full Document AI JSON (OCR response) in the sheet for audit/debugging.
+1. `Vision.gs` `ocrWithVision_(blob)` calls Cloud Vision with `CONFIG.OCR_LANGUAGE_HINTS`
+   (e.g. `['th', 'en']`): images go to `images:annotate`, PDFs to `files:annotate`, both with
+   feature `DOCUMENT_TEXT_DETECTION`. It returns `{ text, response }` where `text` is the OCR raw
+   text (`fullTextAnnotation.text`, joined across pages for PDFs).
+2. `Gemini.gs` `extractInvoiceFieldsWithGemini_(text)` sends that raw text to Gemini on Vertex AI
+   (`generateContent`, model `CONFIG.GEMINI_MODEL` in `CONFIG.GEMINI_LOCATION`) using the deployer's
+   OAuth token (`ScriptApp.getOAuthToken()`, `cloud-platform` scope — no API key needed) and prompts
+   it to return strict JSON: one `{ value, confidence }` object per field in
+   `CONFIG.INVOICE_FIELD_NAMES` (the same 9 internal fields listed above).
+3. `InvoiceMapper.gs`'s `normalizeInvoiceFields_` then normalizes the extracted values: tax ID
+   digits, dates, amounts, currency default.
+4. Preserve the full OCR (Vision) response JSON in the sheet's `Document AI JSON` column for
+   audit/debugging.
 
 Keep the field list in one place (`CONFIG.INVOICE_FIELD_NAMES`) so the Gemini prompt/response
 schema, the empty-invoice default, and `REQUIRED_FIELDS`/`FIELD_THRESHOLDS` stay in sync.
 
 ## Confidence Rules
 
-Document AI provides confidence per entity. The app should also calculate its own invoice-level metrics.
+Gemini returns a self-reported confidence per field (a model estimate, not a calibrated OCR score). The app should also calculate its own invoice-level metrics, and thresholds may need retuning after testing real invoices.
 
 ### Weighted Overall Confidence
 
@@ -244,34 +246,30 @@ supplier_tax_id + invoice_no
 
 If either field is missing, do not mark as duplicate automatically; mark for review instead.
 
-## Document AI Integration Guidelines
+## OCR + Gemini Integration Guidelines
 
-The configured processor (`CONFIG.PROCESSOR_ID`) must be a **Document OCR** processor, not an
-Invoice Parser — Invoice Parser rejects `processOptions.ocrConfig` (used for language hints) with
-`400 OCR_CONFIG_UNSUPPORTED`, and Invoice Parser's Thai entity extraction is unreliable anyway (see
-"Field Extraction" above).
+### Cloud Vision for OCR
 
-For Apps Script, prefer calling Document AI with `UrlFetchApp` and `ScriptApp.getOAuthToken()`:
+Call Cloud Vision with `UrlFetchApp` and `ScriptApp.getOAuthToken()` (no API key). Use
+`DOCUMENT_TEXT_DETECTION` with language hints from `CONFIG.OCR_LANGUAGE_HINTS`.
 
-```text
-https://LOCATION-documentai.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/processors/PROCESSOR_ID:process
-```
-
-Request body should use `rawDocument`, plus OCR language hints:
+Images (`image/jpeg`, `image/png`) → `https://vision.googleapis.com/v1/images:annotate`:
 
 ```json
 {
-  "rawDocument": {
-    "content": "BASE64_CONTENT",
-    "mimeType": "application/pdf"
-  },
-  "processOptions": {
-    "ocrConfig": {
-      "hints": { "languageHints": ["th", "en"] }
-    }
-  }
+  "requests": [{
+    "image": { "content": "BASE64_CONTENT" },
+    "features": [{ "type": "DOCUMENT_TEXT_DETECTION" }],
+    "imageContext": { "languageHints": ["th", "en"] }
+  }]
 }
 ```
+
+Read the text from `responses[0].fullTextAnnotation.text`.
+
+PDF (`application/pdf`) → `https://vision.googleapis.com/v1/files:annotate` with
+`inputConfig: { content, mimeType }` (inline, small PDFs); read the text from
+`responses[0].responses[<page>].fullTextAnnotation.text` and join across pages.
 
 Required header:
 
@@ -297,10 +295,11 @@ separate API key):
 https://LOCATION-aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/publishers/google/models/MODEL:generateContent
 ```
 
-One-time setup required in the Google Cloud project (in addition to the Document AI setup above):
+One-time setup required in the Google Cloud project:
 
-- Enable the **Vertex AI API**.
-- Grant the Apps Script deployer account the **Vertex AI User** IAM role.
+- Enable the **Cloud Vision API** and the **Vertex AI API**.
+- Grant the Apps Script deployer account the **Vertex AI User** IAM role (Vision is callable with
+  the same token once its API is enabled).
 
 Prompt Gemini to return strict JSON (`generationConfig.responseMimeType: "application/json"`) with
 one `{ value, confidence }` object per field in `CONFIG.INVOICE_FIELD_NAMES`, and validate the
@@ -329,7 +328,8 @@ Always handle and record errors from these stages:
 
 - Upload validation.
 - Drive file creation.
-- Document AI API calls.
+- Cloud Vision OCR API calls.
+- Gemini (Vertex AI) field-extraction calls.
 - Entity mapping.
 - Normalization and validation.
 - Duplicate checks.
@@ -342,7 +342,7 @@ Review Status = ERROR
 Error Message = <meaningful message>
 ```
 
-Avoid logging excessive sensitive data in Apps Script logs. Store the original document in Drive and the full Document AI JSON in the configured sheet only if access controls are appropriate.
+Avoid logging excessive sensitive data in Apps Script logs. Store the original document in Drive and the full OCR response JSON in the configured sheet only if access controls are appropriate.
 
 ## Security Guidelines
 
@@ -353,7 +353,7 @@ Invoices may contain tax IDs, addresses, vendor information, and payment amounts
 - Prefer organization-only web app access for internal systems.
 - Avoid hardcoding API keys or secrets.
 - Prefer OAuth/service account permissions over static secrets.
-- Do not expose Document AI processor IDs, project IDs, or raw JSON unnecessarily in the browser UI.
+- Do not expose project IDs or raw OCR/Gemini JSON unnecessarily in the browser UI.
 
 ## Testing Plan
 
@@ -389,13 +389,13 @@ Use test results to tune thresholds and mapping aliases.
 
 ## Implementation Milestones
 
-1. Prototype upload flow: Web App upload, Drive save, Document AI call, append raw result to Sheet.
+1. Prototype upload flow: Web App upload, Drive save, Cloud Vision OCR call, append raw result to Sheet.
 2. Field mapping: map key invoice entities into internal fields and sheet columns.
 3. Confidence and review status: calculate overall confidence, missing fields, low-confidence fields, and status.
 4. Validation: normalize Thai dates, Thai tax IDs, amounts, VAT/total checks, and duplicate detection.
 5. Manual review: add review columns and correction tracking.
 6. Production hardening: logging, error handling, permissions, quotas, and larger test set.
-7. Field extraction via Gemini: Document AI Invoice Parser's entity extraction proved unreliable for Thai text and rejects OCR language hints, so Gemini (Vertex AI) is the primary extraction method — it reads the Document OCR raw text and returns structured fields, not just a fallback for low-confidence cases.
+7. Field extraction via Gemini: Document AI's OCR/entity extraction proved unreliable for Thai, so the OCR layer uses Cloud Vision and Gemini (Vertex AI) is the primary extraction method — it reads the Vision OCR raw text and returns structured fields, not just a fallback for low-confidence cases.
 
 ## Coding Style
 
