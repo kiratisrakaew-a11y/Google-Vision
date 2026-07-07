@@ -20,6 +20,18 @@ const CONFIG = {
   MAX_DOCUMENT_JSON_CHARS: 45000
 };
 
+const INVOICE_FIELD_NAMES = [
+  'supplier_name',
+  'supplier_tax_id',
+  'invoice_no',
+  'invoice_date',
+  'due_date',
+  'subtotal',
+  'vat',
+  'total',
+  'currency'
+];
+
 const FIELD_THRESHOLDS = {
   supplier_name: 0.75,
   supplier_tax_id: 0.80,

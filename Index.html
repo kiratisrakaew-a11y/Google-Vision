@@ -185,7 +185,7 @@
         const validation = response.validation || {};
         const invoice = response.invoice || {};
         const result = document.getElementById('result');
-        const statusClass = validation.reviewStatus === 'OK' ? 'ok' : validation.reviewStatus === 'ERROR' ? 'error' : 'review';
+        const statusClass = validation.reviewStatus === 'OK' ? 'ok' : 'review';
 
         setStatus(statusClass, 'Review Status: ' + validation.reviewStatus);
 

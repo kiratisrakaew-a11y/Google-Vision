@@ -3,18 +3,6 @@
  * Uses the deployer's OAuth token (cloud-platform scope) — no API key.
  */
 
-var GEMINI_INVOICE_FIELDS = [
-  'supplier_name',
-  'supplier_tax_id',
-  'invoice_no',
-  'invoice_date',
-  'due_date',
-  'subtotal',
-  'vat',
-  'total',
-  'currency'
-];
-
 function extractInvoiceFieldsWithGemini_(rawText) {
   var invoice = buildEmptyInvoice_();
 
@@ -28,7 +16,11 @@ function extractInvoiceFieldsWithGemini_(rawText) {
 
   var extracted = callGeminiForInvoice_(rawText);
 
-  GEMINI_INVOICE_FIELDS.forEach(function (field) {
+  if (!extracted || typeof extracted !== 'object' || Array.isArray(extracted)) {
+    throw new Error('Gemini returned an unexpected JSON shape for invoice extraction: ' + JSON.stringify(extracted));
+  }
+
+  INVOICE_FIELD_NAMES.forEach(function (field) {
     var item = extracted[field];
     if (item && typeof item === 'object') {
       invoice[field] = createField_(item.value, Number(item.confidence || 0));
@@ -40,17 +32,11 @@ function extractInvoiceFieldsWithGemini_(rawText) {
 }
 
 function buildEmptyInvoice_() {
-  return {
-    supplier_name: createField_('', 0),
-    supplier_tax_id: createField_('', 0),
-    invoice_no: createField_('', 0),
-    invoice_date: createField_('', 0),
-    due_date: createField_('', 0),
-    subtotal: createField_('', 0),
-    vat: createField_('', 0),
-    total: createField_('', 0),
-    currency: createField_('THB', 0)
-  };
+  var invoice = {};
+  INVOICE_FIELD_NAMES.forEach(function (field) {
+    invoice[field] = createField_(field === 'currency' ? 'THB' : '', 0);
+  });
+  return invoice;
 }
 
 function callGeminiForInvoice_(rawText) {

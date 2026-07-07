@@ -25,9 +25,10 @@ When implementing this project, prefer splitting Apps Script code into these fil
 
 - `Code.gs` - web app entry points, including `doGet()` and `uploadInvoice(payload)`.
 - `Config.gs` - project IDs, sheet/folder IDs, processor configuration, thresholds, and constants.
-- `DocumentAi.gs` - Document AI API calls and response handling.
-- `InvoiceMapper.gs` - mapping Document AI entities into the app's invoice data model.
-- `Validation.gs` - normalization, validation, confidence calculation, and review status logic.
+- `DocumentAi.gs` - Document AI OCR processor calls and response handling (OCR only; does not do field extraction).
+- `Gemini.gs` - Gemini (Vertex AI) field extraction from the OCR raw text into the app's invoice data model.
+- `InvoiceMapper.gs` - shared field helpers (`createField_`) and normalization (`normalizeInvoiceFields_`) applied to the extracted invoice.
+- `Validation.gs` - normalization helpers, validation, confidence calculation, and review status logic.
 - `SheetService.gs` - Google Sheet append, duplicate detection, and audit log writes.
 - `Index.html` - upload UI and client-side JavaScript.
 
@@ -98,28 +99,27 @@ Use this internal field naming consistently:
 }
 ```
 
-## Document AI Entity Mapping
+## Field Extraction (Document OCR + Gemini)
 
-Map Document AI Invoice Parser entities to internal fields as follows. Entity names can vary by processor version, so keep aliases easy to update in one place.
+The pretrained Document AI Invoice Parser reliably extracts numbers and English text, but garbles
+Thai text and rejects OCR language-hint configuration (`ocrConfig` on the Invoice Parser returns
+`400 OCR_CONFIG_UNSUPPORTED`). Because invoices in this project are frequently Thai and vary widely
+in layout, field extraction uses OCR + an LLM instead of Invoice Parser entities:
 
-| Internal field | Document AI entity type candidates |
-| --- | --- |
-| `supplier_name` | `supplier_name` |
-| `supplier_tax_id` | `supplier_tax_id` |
-| `invoice_no` | `invoice_id` |
-| `invoice_date` | `invoice_date` |
-| `due_date` | `due_date` |
-| `subtotal` | `net_amount`, `subtotal` |
-| `vat` | `total_tax_amount`, `tax_amount` |
-| `total` | `total_amount`, `amount_due` |
-| `currency` | `currency` |
+1. `DocumentAi.gs` calls a **Document OCR** processor (not Invoice Parser) with
+   `processOptions.ocrConfig.hints.languageHints` (`CONFIG.OCR_LANGUAGE_HINTS`, e.g. `['th', 'en']`)
+   so Thai text is read correctly. The response's `document.text` is the OCR raw text.
+2. `Gemini.gs` sends that raw text to Gemini on Vertex AI (`generateContent`, model
+   `CONFIG.GEMINI_MODEL` in `CONFIG.GEMINI_LOCATION`) using the deployer's OAuth token
+   (`ScriptApp.getOAuthToken()`, `cloud-platform` scope — no API key needed) and prompts it to
+   return strict JSON: one `{ value, confidence }` object per field in `CONFIG.INVOICE_FIELD_NAMES`
+   (the same 9 internal fields listed above).
+3. `InvoiceMapper.gs`'s `normalizeInvoiceFields_` then normalizes the extracted values the same way
+   regardless of source: tax ID digits, dates, amounts, currency default.
+4. Preserve the original full Document AI JSON (OCR response) in the sheet for audit/debugging.
 
-When extracting a field:
-
-1. Prefer `normalizedValue.text` when present.
-2. Fall back to `mentionText`.
-3. If multiple entities match the same field, select the highest-confidence candidate unless a field-specific rule says otherwise.
-4. Preserve the original full Document AI JSON in the sheet for audit/debugging.
+Keep the field list in one place (`CONFIG.INVOICE_FIELD_NAMES`) so the Gemini prompt/response
+schema, the empty-invoice default, and `REQUIRED_FIELDS`/`FIELD_THRESHOLDS` stay in sync.
 
 ## Confidence Rules
 
@@ -246,19 +246,29 @@ If either field is missing, do not mark as duplicate automatically; mark for rev
 
 ## Document AI Integration Guidelines
 
+The configured processor (`CONFIG.PROCESSOR_ID`) must be a **Document OCR** processor, not an
+Invoice Parser — Invoice Parser rejects `processOptions.ocrConfig` (used for language hints) with
+`400 OCR_CONFIG_UNSUPPORTED`, and Invoice Parser's Thai entity extraction is unreliable anyway (see
+"Field Extraction" above).
+
 For Apps Script, prefer calling Document AI with `UrlFetchApp` and `ScriptApp.getOAuthToken()`:
 
 ```text
 https://LOCATION-documentai.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/processors/PROCESSOR_ID:process
 ```
 
-Request body should use `rawDocument`:
+Request body should use `rawDocument`, plus OCR language hints:
 
 ```json
 {
   "rawDocument": {
     "content": "BASE64_CONTENT",
     "mimeType": "application/pdf"
+  },
+  "processOptions": {
+    "ocrConfig": {
+      "hints": { "languageHints": ["th", "en"] }
+    }
   }
 }
 ```
@@ -277,6 +287,25 @@ https://www.googleapis.com/auth/cloud-platform
 ```
 
 Also include only the Drive and Sheets scopes the implementation actually needs.
+
+### Gemini (Vertex AI) for field extraction
+
+Field extraction calls Gemini's `generateContent` on Vertex AI, reusing the same OAuth token (no
+separate API key):
+
+```text
+https://LOCATION-aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/publishers/google/models/MODEL:generateContent
+```
+
+One-time setup required in the Google Cloud project (in addition to the Document AI setup above):
+
+- Enable the **Vertex AI API**.
+- Grant the Apps Script deployer account the **Vertex AI User** IAM role.
+
+Prompt Gemini to return strict JSON (`generationConfig.responseMimeType: "application/json"`) with
+one `{ value, confidence }` object per field in `CONFIG.INVOICE_FIELD_NAMES`, and validate the
+response is a plain object before reading fields from it — a malformed or wrong-shaped response
+should raise a clear error rather than fail silently or crash.
 
 ## Upload UI Requirements
 
@@ -366,7 +395,7 @@ Use test results to tune thresholds and mapping aliases.
 4. Validation: normalize Thai dates, Thai tax IDs, amounts, VAT/total checks, and duplicate detection.
 5. Manual review: add review columns and correction tracking.
 6. Production hardening: logging, error handling, permissions, quotas, and larger test set.
-7. Optional fallback: use Gemini only for low-confidence normalization or review suggestions, not as the sole source of truth unless requested.
+7. Field extraction via Gemini: Document AI Invoice Parser's entity extraction proved unreliable for Thai text and rejects OCR language hints, so Gemini (Vertex AI) is the primary extraction method — it reads the Document OCR raw text and returns structured fields, not just a fallback for low-confidence cases.
 
 ## Coding Style
 
