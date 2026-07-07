@@ -20,11 +20,10 @@ function uploadInvoice(payload) {
     var uploadedFile = saveInvoiceFile_(blob);
     writeLog_('INFO', fileName, 'DRIVE', 'Invoice file saved to Drive', uploadedFile.getUrl());
 
-    var documentAiResponse = processInvoiceWithDocumentAi_(blob);
-    writeLog_('INFO', fileName, 'DOCUMENT_AI', 'Document AI processing completed', '');
+    var ocr = ocrWithVision_(blob);
+    writeLog_('INFO', fileName, 'VISION', 'OCR completed', '');
 
-    var document = documentAiResponse.document || {};
-    var invoice = extractInvoiceFieldsWithGemini_(document.text || '');
+    var invoice = extractInvoiceFieldsWithGemini_(ocr.text || '');
     normalizeInvoiceFields_(invoice);
     writeLog_('INFO', fileName, 'GEMINI', 'Field extraction completed', '');
 
@@ -43,8 +42,8 @@ function uploadInvoice(payload) {
         fileName: payload.fileName,
         fileUrl: uploadedFile.getUrl(),
         invoice: invoice,
-        rawText: document.text || '',
-        documentJson: documentAiResponse,
+        rawText: ocr.text || '',
+        documentJson: ocr.response,
         validation: validation,
         errorMessage: ''
       });
