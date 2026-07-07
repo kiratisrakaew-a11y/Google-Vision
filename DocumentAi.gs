@@ -15,15 +15,15 @@ function processInvoiceWithDocumentAi_(blob) {
     }
   };
 
+  var ocrConfig = {
+    enableNativePdfParsing: CONFIG.OCR_ENABLE_NATIVE_PDF_PARSING
+  };
   if (CONFIG.OCR_LANGUAGE_HINTS && CONFIG.OCR_LANGUAGE_HINTS.length) {
-    payload.processOptions = {
-      ocrConfig: {
-        hints: {
-          languageHints: CONFIG.OCR_LANGUAGE_HINTS
-        }
-      }
+    ocrConfig.hints = {
+      languageHints: CONFIG.OCR_LANGUAGE_HINTS
     };
   }
+  payload.processOptions = { ocrConfig: ocrConfig };
 
   var response = UrlFetchApp.fetch(endpoint, {
     method: 'post',
