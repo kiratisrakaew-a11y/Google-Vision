@@ -34,6 +34,12 @@ function mapInvoiceFields_(document) {
     invoice[fieldName] = createField_(getEntityValue_(entity), Number(entity.confidence || 0));
   });
 
+  normalizeInvoiceFields_(invoice);
+
+  return invoice;
+}
+
+function normalizeInvoiceFields_(invoice) {
   invoice.supplier_tax_id.value = normalizeTaxId_(invoice.supplier_tax_id.value);
   invoice.invoice_date.value = normalizeDate_(invoice.invoice_date.value);
   invoice.due_date.value = normalizeDate_(invoice.due_date.value);

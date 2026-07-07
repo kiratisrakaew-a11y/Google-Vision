@@ -24,7 +24,10 @@ function uploadInvoice(payload) {
     writeLog_('INFO', fileName, 'DOCUMENT_AI', 'Document AI processing completed', '');
 
     var document = documentAiResponse.document || {};
-    var invoice = mapInvoiceFields_(document);
+    var invoice = extractInvoiceFieldsWithGemini_(document.text || '');
+    normalizeInvoiceFields_(invoice);
+    writeLog_('INFO', fileName, 'GEMINI', 'Field extraction completed', '');
+
     var validation = validateInvoice_(invoice);
 
     var lock = LockService.getScriptLock();
