@@ -21,7 +21,7 @@ function appendInvoiceToSheet_(record) {
     validation.reviewStatus || '',
     (validation.missingFields || []).join(', '),
     (validation.lowConfidenceFields || []).join(', '),
-    record.rawText || '',
+    truncateForCell_(record.rawText || ''),
     prepareDocumentJsonCell_(record.fileName, record.documentJson || {}),
     record.errorMessage || '',
     '',
