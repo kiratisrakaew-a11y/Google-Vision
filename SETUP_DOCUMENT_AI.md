@@ -1,16 +1,23 @@
-# คู่มือ Setup Google Document AI สำหรับ Invoice OCR App
+# คู่มือ Setup Google Document AI + Gemini สำหรับ Invoice OCR App
 
-คู่มือนี้อธิบายวิธีเชื่อม Google Apps Script Web App ใน repo นี้กับ Google Document AI Invoice Parser เพื่อให้ flow ทำงานครบตั้งแต่ upload invoice, save ไฟล์ลง Drive, เรียก Document AI, extract field, validate confidence และบันทึกลง Google Sheet
+คู่มือนี้อธิบายวิธีเชื่อม Google Apps Script Web App ใน repo นี้กับ Google Cloud เพื่อให้ flow ทำงานครบตั้งแต่ upload invoice, save ไฟล์ลง Drive, อ่านข้อความด้วย Document AI (Document OCR), ดึงฟิลด์ invoice ด้วย Gemini (Vertex AI), validate confidence และบันทึกลง Google Sheet
+
+ระบบใช้ 2 ขั้นตอนแยกกัน:
+
+1. **Document AI — Document OCR processor**: อ่านข้อความจากไฟล์ (รองรับภาษาไทยด้วย language hints)
+2. **Gemini บน Vertex AI**: ดึงฟิลด์ invoice (supplier_name, invoice_no, total ฯลฯ) จากข้อความที่ OCR ได้
+
+> เดิมระบบเคยใช้ Document AI **Invoice Parser** เพื่อดึงฟิลด์โดยตรง แต่ Invoice Parser จับข้อความไทยไม่ได้ดีและปฏิเสธการตั้งค่า OCR language hint (error `400 OCR_CONFIG_UNSUPPORTED`) จึงเปลี่ยนมาใช้ Document OCR + Gemini แทน
 
 ## 1. สิ่งที่ต้องมีก่อนเริ่ม
 
 ต้องเตรียมรายการต่อไปนี้:
 
-- Google Cloud Project สำหรับ Document AI
+- Google Cloud Project ที่เปิดใช้ทั้ง **Document AI API** และ **Vertex AI API**
 - Google Sheet สำหรับเก็บผลลัพธ์ invoice
 - Google Drive folder สำหรับเก็บไฟล์ invoice ต้นฉบับ
 - Apps Script project ที่มีไฟล์จาก repo นี้
-- Account ที่ deploy Apps Script และมีสิทธิ์เรียก Document AI ใน Google Cloud Project
+- Account ที่ deploy Apps Script และมีสิทธิ์เรียก Document AI + Vertex AI ใน Google Cloud Project
 
 ค่าที่ต้องนำมาใส่ใน `Config.gs`:
 
@@ -20,10 +27,13 @@
 | `DRIVE_FOLDER_ID` | Drive folder สำหรับเก็บ invoice upload | `1folder...xyz` |
 | `DOCUMENT_JSON_FOLDER_ID` | Drive folder สำหรับเก็บ Document AI JSON ขนาดใหญ่ ถ้าเว้นว่างจะใช้ `DRIVE_FOLDER_ID` | `1json...xyz` หรือ `''` |
 | `PROJECT_ID` | Google Cloud Project ID | `my-invoice-project` |
-| `LOCATION` | Region ของ Document AI processor | `us` |
-| `PROCESSOR_ID` | Invoice Parser processor ID | `1234567890abcdef` |
+| `LOCATION` | Region ของ Document AI **Document OCR** processor | `us` |
+| `PROCESSOR_ID` | Document OCR processor ID (ไม่ใช่ Invoice Parser) | `1234567890abcdef` |
+| `GEMINI_LOCATION` | Region ของ Vertex AI ที่จะเรียก Gemini | `us-central1` |
+| `GEMINI_MODEL` | ชื่อ Gemini model บน Vertex AI | `gemini-2.5-flash` |
+| `OCR_LANGUAGE_HINTS` | ภาษาที่ใบ้ให้ OCR อ่าน (BCP-47) | `['th', 'en']` |
 
-## 2. เปิดใช้งาน Document AI API
+## 2. เปิดใช้งาน API ที่จำเป็น
 
 ใน Google Cloud Console:
 
@@ -31,22 +41,24 @@
 2. ไปที่ **APIs & Services**
 3. เลือก **Enable APIs and Services**
 4. ค้นหาและเปิดใช้งาน **Document AI API**
-5. ตรวจสอบว่า billing ของ project พร้อมใช้งาน เพราะ Document AI เป็นบริการที่มีค่าใช้จ่ายตาม usage
+5. ค้นหาและเปิดใช้งาน **Vertex AI API** (จำเป็นสำหรับเรียก Gemini)
+6. ตรวจสอบว่า billing ของ project พร้อมใช้งาน เพราะ Document AI และ Vertex AI เป็นบริการที่มีค่าใช้จ่ายตาม usage
 
-## 3. สร้าง Invoice Parser Processor
+## 3. สร้าง Document OCR Processor
 
 ใน Google Cloud Console:
 
 1. ไปที่ **Document AI**
-2. เลือก **Processors**
-3. กด **Create Processor**
-4. เลือก processor ประเภท **Invoice Parser**
-5. เลือก region เช่น `us`
-6. ตั้งชื่อ processor เช่น `invoice-parser`
-7. หลังสร้างเสร็จ ให้จดค่า:
+2. เลือก **Processors** → **Create Processor**
+3. เลือก processor ประเภท **Document OCR** (อยู่ในหมวด OCR/General — **ไม่ใช่** Invoice Parser)
+4. เลือก region เช่น `us`
+5. ตั้งชื่อ processor เช่น `thai-ocr`
+6. หลังสร้างเสร็จ ให้จดค่า:
    - `PROJECT_ID`
    - `LOCATION`
    - `PROCESSOR_ID`
+
+> **ทำไมไม่ใช้ Invoice Parser:** Invoice Parser ปฏิเสธ `processOptions.ocrConfig` (ที่ใช้ตั้ง language hints ภาษาไทย) ด้วย error `400 OCR_CONFIG_UNSUPPORTED` และ entity extraction ของมันไม่รองรับข้อความไทยดีพอ ระบบนี้จึงใช้ Document OCR อ่านข้อความอย่างเดียว แล้วให้ Gemini เป็นตัวดึงฟิลด์แทน
 
 ตัวอย่าง endpoint ที่ code จะเรียก:
 
@@ -56,20 +68,22 @@ https://us-documentai.googleapis.com/v1/projects/my-invoice-project/locations/us
 
 ## 4. ให้สิทธิ์ account ที่รัน Apps Script
 
-ระบบนี้ใช้ OAuth token จาก Apps Script ผ่าน `ScriptApp.getOAuthToken()` ดังนั้น account ที่เป็น owner/deployer ของ Apps Script ต้องมีสิทธิ์ใน Google Cloud Project
+ระบบนี้ใช้ OAuth token จาก Apps Script ผ่าน `ScriptApp.getOAuthToken()` ทั้งตอนเรียก Document AI และ Gemini/Vertex AI ดังนั้น account ที่เป็น owner/deployer ของ Apps Script ต้องมีสิทธิ์ใน Google Cloud Project ทั้งสองบริการ
 
 แนะนำให้ให้ role อย่างน้อย:
 
 ```text
 Document AI API User
+Vertex AI User
 ```
 
-ถ้าองค์กรมี policy เฉพาะ ให้ใช้ custom role ที่สามารถเรียก processor endpoint ได้
+ถ้าองค์กรมี policy เฉพาะ ให้ใช้ custom role ที่สามารถเรียก Document AI `:process` และ Vertex AI `:generateContent` endpoint ได้
 
 อาการที่บ่งชี้ว่าสิทธิ์ไม่พอ:
 
 ```text
 Document AI API error 403: Permission denied
+Gemini API error 403: ...
 ```
 
 ## 5. สร้าง Google Sheet
@@ -121,9 +135,12 @@ const CONFIG = {
   PROJECT_ID: 'PUT_YOUR_PROJECT_ID_HERE',
   LOCATION: 'us',
   PROCESSOR_ID: 'PUT_YOUR_PROCESSOR_ID_HERE',
+  GEMINI_LOCATION: 'us-central1',
+  GEMINI_MODEL: 'gemini-2.5-flash',
   OVERALL_CONFIDENCE_THRESHOLD: 0.80,
   AMOUNT_TOLERANCE: 1,
   VAT_RATE: 0.07,
+  OCR_LANGUAGE_HINTS: ['th', 'en'],
   MAX_DOCUMENT_JSON_CHARS: 45000
 };
 ```
@@ -140,9 +157,12 @@ const CONFIG = {
   PROJECT_ID: 'my-invoice-project',
   LOCATION: 'us',
   PROCESSOR_ID: '1234567890abcdef',
+  GEMINI_LOCATION: 'us-central1',
+  GEMINI_MODEL: 'gemini-2.5-flash',
   OVERALL_CONFIDENCE_THRESHOLD: 0.80,
   AMOUNT_TOLERANCE: 1,
   VAT_RATE: 0.07,
+  OCR_LANGUAGE_HINTS: ['th', 'en'],
   MAX_DOCUMENT_JSON_CHARS: 45000
 };
 ```
@@ -166,8 +186,8 @@ const CONFIG = {
 
 | Scope | เหตุผล |
 | --- | --- |
-| `script.external_request` | ให้ `UrlFetchApp.fetch()` เรียก Document AI REST API ได้ |
-| `cloud-platform` | ให้ OAuth token เรียก Google Cloud / Document AI ได้ |
+| `script.external_request` | ให้ `UrlFetchApp.fetch()` เรียก Document AI และ Vertex AI REST API ได้ |
+| `cloud-platform` | ให้ OAuth token เรียกทั้ง Google Cloud Document AI และ Vertex AI (Gemini) ได้ ไม่ต้องมี API key แยก |
 | `drive` | ให้ save invoice และ JSON audit files ลง Drive ได้ |
 | `spreadsheets` | ให้ append result และ logs ลง Google Sheet ได้ |
 
@@ -198,27 +218,30 @@ Index.html
   -> google.script.run.uploadInvoice(payload)
   -> Code.gs validates payload
   -> Save file to Drive
-  -> DocumentAi.gs sends rawDocument to Document AI
-  -> InvoiceMapper.gs maps entities
-  -> Validation.gs normalizes and validates fields
+  -> DocumentAi.gs sends rawDocument (+ languageHints) to Document OCR processor
+  -> Gemini.gs extracts invoice fields from OCR raw text via Vertex AI (Gemini)
+  -> InvoiceMapper.gs normalizes fields (tax id, dates, amounts, currency)
+  -> Validation.gs calculates confidence and review status
   -> SheetService.gs checks duplicate and appends row
   -> UI shows extracted fields and confidence
 ```
 
-## 11. วิธีตรวจสอบว่าเชื่อม Document AI ได้
+## 11. วิธีตรวจสอบว่าเชื่อม Document AI + Gemini ได้
 
 หลัง upload invoice สำเร็จ ให้ตรวจสอบ:
 
 1. มีไฟล์ invoice ถูกสร้างใน Drive folder
 2. มี row ใหม่ใน sheet `Invoices`
-3. Column `Review Status` เป็น `OK`, `NEEDS_REVIEW`, หรือ `DUPLICATE`
-4. Column `Document AI JSON` มี JSON หรือ Drive URL ของ JSON audit file
-5. Sheet `Logs` มี event เช่น:
+3. Column `Raw Text` แสดงข้อความไทยถูกต้อง (ไม่ใช่ตัวอักษรมั่ว)
+4. Column `Review Status` เป็น `OK`, `NEEDS_REVIEW`, หรือ `DUPLICATE`
+5. Column `Document AI JSON` มี JSON หรือ Drive URL ของ JSON audit file
+6. Sheet `Logs` มี event เช่น:
 
 ```text
 UPLOAD
 DRIVE
 DOCUMENT_AI
+GEMINI
 SHEET
 ```
 
@@ -244,12 +267,12 @@ Missing configuration value: CONFIG.PROJECT_ID
 
 สาเหตุที่พบบ่อย:
 
-- Account ที่ deploy Apps Script ไม่มีสิทธิ์เรียก Document AI
+- Account ที่ deploy Apps Script ไม่มีสิทธิ์เรียก Document AI หรือ Vertex AI
 - ยังไม่ได้ให้ role ใน Google Cloud IAM
 
 วิธีแก้:
 
-- เพิ่ม role `Document AI API User` ให้ account ที่ deploy Apps Script
+- เพิ่ม role `Document AI API User` (สำหรับ Document OCR) และ `Vertex AI User` (สำหรับ Gemini) ให้ account ที่ deploy Apps Script
 
 ### 12.3 404 Processor not found
 
@@ -262,7 +285,42 @@ Missing configuration value: CONFIG.PROJECT_ID
 
 - ตรวจค่า processor จาก Google Cloud Console แล้วแก้ `Config.gs`
 
-### 12.4 Unsupported file type
+### 12.4 400 OCR_CONFIG_UNSUPPORTED
+
+ตัวอย่าง:
+
+```text
+Document AI API error 400: OcrConfig is not supported for processor type: 'INVOICE_PROCESSOR'.
+```
+
+สาเหตุ:
+
+- `CONFIG.PROCESSOR_ID` ชี้ไปที่ processor ประเภท **Invoice Parser** แทนที่จะเป็น **Document OCR**
+
+วิธีแก้:
+
+- สร้าง processor ใหม่เป็นประเภท Document OCR ตามข้อ 3 แล้วแก้ `PROCESSOR_ID` ใน `Config.gs`
+
+### 12.5 Gemini คืนค่าผิดรูปแบบ
+
+ตัวอย่าง error ที่เจอใน `Error Message` / sheet `Logs`:
+
+```text
+Gemini returned an unexpected JSON shape for invoice extraction: ...
+Gemini returned non-JSON content: ...
+```
+
+สาเหตุที่พบบ่อย:
+
+- Vertex AI ตอบกลับมาไม่ตรงรูปแบบ JSON ที่คาดไว้ (เช่น model ปฏิเสธคำสั่งเพราะเนื้อหาผิดปกติ)
+- `GEMINI_MODEL` หรือ `GEMINI_LOCATION` ตั้งค่าไม่ถูกต้อง
+
+วิธีแก้:
+
+- ตรวจสอบ `GEMINI_MODEL`/`GEMINI_LOCATION` ใน `Config.gs` ว่าถูกต้องและใช้งานได้ใน region ที่เลือก
+- ลองอัปโหลดไฟล์เดิมซ้ำ หากเกิดซ้ำบ่อยให้ตรวจสอบเนื้อหา `Raw Text` ว่าผิดปกติหรือไม่
+
+### 12.6 Unsupported file type
 
 ระบบรองรับ MIME type:
 
@@ -274,7 +332,7 @@ image/png
 
 ถ้า upload format อื่น ระบบจะ reject ที่ `validateUploadPayload_()`
 
-### 12.5 JSON audit file ไม่ถูกสร้าง
+### 12.7 JSON audit file ไม่ถูกสร้าง
 
 ถ้า Document AI JSON ใหญ่มาก ระบบจะพยายามเก็บเป็นไฟล์ `.json` ใน Drive หากสร้างไฟล์ไม่ได้จะ fallback เป็น truncated text ใน Sheet
 
@@ -287,14 +345,17 @@ image/png
 ## 13. Checklist ก่อนใช้งานจริง
 
 - [ ] เปิด Document AI API แล้ว
-- [ ] สร้าง Invoice Parser processor แล้ว
+- [ ] เปิด Vertex AI API แล้ว
+- [ ] สร้าง Document OCR processor แล้ว (ไม่ใช่ Invoice Parser)
 - [ ] ใส่ `PROJECT_ID`, `LOCATION`, `PROCESSOR_ID` แล้ว
+- [ ] ใส่ `GEMINI_LOCATION`, `GEMINI_MODEL` แล้ว
 - [ ] ใส่ `SHEET_ID` แล้ว
 - [ ] ใส่ `DRIVE_FOLDER_ID` แล้ว
-- [ ] Account ที่ deploy มีสิทธิ์ Document AI แล้ว
+- [ ] Account ที่ deploy มีสิทธิ์ `Document AI API User` แล้ว
+- [ ] Account ที่ deploy มีสิทธิ์ `Vertex AI User` แล้ว
 - [ ] Apps Script OAuth scopes ครบแล้ว
 - [ ] Deploy เป็น Web App แล้ว
-- [ ] ทดสอบ upload invoice จริงอย่างน้อย 5-10 ไฟล์ก่อนเริ่มใช้งาน
+- [ ] ทดสอบ upload invoice จริงอย่างน้อย 5-10 ไฟล์ก่อนเริ่มใช้งาน (รวมไฟล์ภาษาไทย)
 - [ ] ก่อน production ควรทดสอบ 30-50 invoices จากหลาย vendor/layout
 
 ## 14. คำแนะนำสำหรับ production
@@ -304,5 +365,5 @@ image/png
 - อย่า hardcode secrets หรือ API keys ใน code
 - ตั้ง review workflow สำหรับ invoice ที่ `NEEDS_REVIEW`
 - ตรวจ accuracy แยกตาม field เช่น tax ID, invoice no, date, total
-- ปรับ thresholds หลังทดสอบกับ invoice จริง
-- เปิด billing alert ใน Google Cloud เพื่อติดตามค่าใช้จ่าย Document AI
+- ปรับ thresholds หลังทดสอบกับ invoice จริง — ค่า confidence จาก Gemini เป็นการประเมินของโมเดลเอง (ไม่ใช่ calibrated confidence per-entity แบบ Document AI เดิม) จึงควรทดสอบและปรับ `FIELD_THRESHOLDS` ให้เหมาะสม
+- เปิด billing alert ใน Google Cloud เพื่อติดตามค่าใช้จ่าย Document AI และ Vertex AI (Gemini)
