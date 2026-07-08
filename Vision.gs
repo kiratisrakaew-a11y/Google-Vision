@@ -35,7 +35,8 @@ function ocrWithVision_(blob) {
     method: 'post',
     contentType: 'application/json',
     headers: {
-      Authorization: 'Bearer ' + ScriptApp.getOAuthToken()
+      Authorization: 'Bearer ' + ScriptApp.getOAuthToken(),
+      'X-Goog-User-Project': CONFIG.PROJECT_ID
     },
     payload: JSON.stringify(request),
     muteHttpExceptions: true
